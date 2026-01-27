@@ -1,4 +1,4 @@
-# object_detector_final.py
+# استيراد المكتبات
 import cv2
 import numpy as np
 import pickle
@@ -6,18 +6,16 @@ import os
 import time
 import sys
 
-# Try to import matplotlib for display
 try:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    print("Matplotlib not available, using simple display")
 
+# فئة كاشف الأشياء البسيط
 class SimpleObjectDetector:
     def __init__(self, use_matplotlib=True):
-        # Initialize camera
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             self.cap = cv2.VideoCapture(1)
@@ -25,11 +23,9 @@ class SimpleObjectDetector:
                 print("Error: No camera found!")
                 sys.exit(1)
         
-        # Set camera resolution
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
-        # Try to load Haar cascades
         self.cascade_files = {
             'face': 'haarcascade_frontalface_default.xml',
             'eye': 'haarcascade_eye.xml',
@@ -39,28 +35,24 @@ class SimpleObjectDetector:
         self.cascades = {}
         self.load_cascades()
         
-        # Learned objects
         self.learned_objects = {}
         self.model_file = "objects_memory.pkl"
         self.load_objects()
         
-        # User interaction
         self.correction_mode = False
         self.selected_box = None
         self.correction_text = ""
         self.key_pressed = None
         self.running = True
         
-        # Colors
         self.colors = {
-            'face': (0, 255, 0),      # Green
-            'eye': (255, 0, 0),       # Blue
-            'smile': (0, 255, 255),   # Yellow
-            'learned': (255, 0, 255), # Purple
-            'color': (0, 165, 255),   # Orange
+            'face': (0, 255, 0),
+            'eye': (255, 0, 0),
+            'smile': (0, 255, 255),
+            'learned': (255, 0, 255),
+            'color': (0, 165, 255),
         }
         
-        # Display method
         self.use_matplotlib = use_matplotlib and MATPLOTLIB_AVAILABLE
         
         print("=" * 60)
@@ -77,7 +69,6 @@ class SimpleObjectDetector:
         print("\nPoint camera at objects and press 'c' to teach me!")
     
     def load_cascades(self):
-        """Load Haar cascade classifiers"""
         cascade_path = cv2.data.haarcascades
         
         for name, filename in self.cascade_files.items():
@@ -87,11 +78,9 @@ class SimpleObjectDetector:
                 print(f"✓ Loaded {name} cascade")
             else:
                 print(f"✗ Could not find {filename}")
-                # Create dummy cascade if not found
                 self.cascades[name] = None
     
     def load_objects(self):
-        """Load learned objects"""
         if os.path.exists(self.model_file):
             try:
                 with open(self.model_file, 'rb') as f:
@@ -105,12 +94,13 @@ class SimpleObjectDetector:
             self.learned_objects = {}
     
     def save_objects(self):
-        """Save learned objects"""
-        with open(self.model_file, 'wb') as f:
-            pickle.dump(self.learned_objects, f)
+        try:
+            with open(self.model_file, 'wb') as f:
+                pickle.dump(self.learned_objects, f)
+        except Exception as e:
+            print(f"Error saving objects: {e}")
     
     def detect_faces(self, gray):
-        """Detect faces using Haar cascade"""
         if self.cascades.get('face'):
             faces = self.cascades['face'].detectMultiScale(
                 gray,
@@ -122,19 +112,16 @@ class SimpleObjectDetector:
         return []
     
     def detect_eyes(self, gray, face_region):
-        """Detect eyes within a face region"""
         if self.cascades.get('eye'):
             x, y, w, h = face_region
             roi_gray = gray[y:y+h, x:x+w]
             eyes = self.cascades['eye'].detectMultiScale(roi_gray)
             
-            # Convert to full image coordinates
             eyes_full = [(x + ex, y + ey, ew, eh) for (ex, ey, ew, eh) in eyes]
             return eyes_full
         return []
     
     def detect_smiles(self, gray, face_region):
-        """Detect smiles within a face region"""
         if self.cascades.get('smile'):
             x, y, w, h = face_region
             roi_gray = gray[y:y+h, x:x+w]
@@ -145,19 +132,15 @@ class SimpleObjectDetector:
                 minSize=(25, 25)
             )
             
-            # Convert to full image coordinates
             smiles_full = [(x + sx, y + sy, sw, sh) for (sx, sy, sw, sh) in smiles]
             return smiles_full
         return []
     
     def detect_color_blobs(self, frame):
-        """Detect colored objects using color thresholding"""
         detections = []
         
-        # Convert to HSV
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Color ranges
         colors = {
             'red': ([0, 120, 70], [10, 255, 255]),
             'blue': ([100, 150, 0], [140, 255, 255]),
@@ -166,41 +149,35 @@ class SimpleObjectDetector:
         }
         
         for color_name, (lower, upper) in colors.items():
-            # Create mask
             lower_np = np.array(lower)
             upper_np = np.array(upper)
             mask = cv2.inRange(hsv, lower_np, upper_np)
             
-            # Clean up mask
             kernel = np.ones((5, 5), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             
-            # Find contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for contour in contours:
                 area = cv2.contourArea(contour)
-                if 1000 < area < 50000:  # Size filter
+                if 1000 < area < 50000:
                     x, y, w, h = cv2.boundingRect(contour)
                     
-                    # Check if similar object already detected
                     is_duplicate = False
                     for det in detections:
                         dx, dy, dw, dh = det['box']
-                        # If centers are close, skip
-                        if abs((x + w/2) - (dx + dw/2)) < 50 and abs((y + h/2) - (dy + dh/2)) < 50:
+                        center_dist = np.sqrt(((x + w/2) - (dx + dw/2))**2 + ((y + h/2) - (dy + dh/2))**2)
+                        if center_dist < 50:
                             is_duplicate = True
                             break
                     
                     if not is_duplicate:
-                        # Check if this matches any learned object
                         object_name = None
                         confidence = 0.0
                         
                         for learned_name, learned_data in self.learned_objects.items():
                             lx, ly, lw, lh = learned_data['position']
-                            # If position and size are similar
                             if (abs(x - lx) < 100 and abs(y - ly) < 100 and 
                                 abs(w - lw) < 50 and abs(h - lh) < 50):
                                 object_name = learned_name
@@ -218,47 +195,39 @@ class SimpleObjectDetector:
         return detections
     
     def draw_detections(self, frame, detections):
-        """Draw bounding boxes and labels on frame"""
         for detection in detections:
             x, y, w, h = detection['box']
             obj_type = detection['type']
             name = detection['name']
             confidence = detection.get('confidence', 0.0)
             
-            # Choose color
             if obj_type in self.colors:
                 color = self.colors[obj_type]
             elif name in self.learned_objects:
                 color = self.colors['learned']
             else:
-                color = (200, 200, 200)  # Gray
+                color = (200, 200, 200)
             
-            # Draw bounding box
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
             
-            # Prepare label
             if confidence > 0:
                 label = f"{name} ({confidence:.1f})"
             else:
                 label = name
             
-            # Calculate text size
             (text_width, text_height), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2
             )
             
-            # Draw label background
             cv2.rectangle(frame, 
                          (x, y - text_height - 10),
                          (x + text_width + 10, y),
                          color, -1)
             
-            # Draw label
             cv2.putText(frame, label,
                        (x + 5, y - 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
-            # Highlight if selected
             if self.correction_mode and self.selected_box == (x, y, w, h):
                 cv2.rectangle(frame, (x-3, y-3), (x + w + 3, y + h + 3), (0, 0, 255), 3)
                 cv2.putText(frame, "SELECTED", 
@@ -268,18 +237,14 @@ class SimpleObjectDetector:
         return frame
     
     def draw_ui(self, frame):
-        """Draw user interface elements"""
-        # Top instructions
         cv2.putText(frame, "Press 'c' to teach, ENTER to save, 'q' to quit", 
                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Stats
-        stats = f"Objects: {len(self.learned_objects)} learned | Detections: {len([d for d in self.detections if d]) if hasattr(self, 'detections') else 0}"
+        stats = f"Objects: {len(self.learned_objects)} learned"
         cv2.putText(frame, stats, 
                    (10, frame.shape[0] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        # Correction UI
         if self.correction_mode:
             cv2.rectangle(frame, (0, 30), (400, 100), (0, 0, 0), -1)
             
@@ -298,23 +263,17 @@ class SimpleObjectDetector:
         return frame
     
     def process_frame(self):
-        """Process one frame from camera"""
         ret, frame = self.cap.read()
         if not ret:
             return None
         
-        # Flip for mirror effect
         frame = cv2.flip(frame, 1)
         self.current_frame = frame.copy()
         
-        # Convert to grayscale for face detection
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # For matplotlib
         gray_cv = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Detect objects
         all_detections = []
         
-        # 1. Detect faces
         faces = self.detect_faces(gray_cv)
         for (x, y, w, h) in faces:
             all_detections.append({
@@ -324,7 +283,6 @@ class SimpleObjectDetector:
                 'confidence': 1.0
             })
             
-            # Detect eyes in this face
             eyes = self.detect_eyes(gray_cv, (x, y, w, h))
             for (ex, ey, ew, eh) in eyes:
                 all_detections.append({
@@ -334,7 +292,6 @@ class SimpleObjectDetector:
                     'confidence': 1.0
                 })
             
-            # Detect smiles in this face
             smiles = self.detect_smiles(gray_cv, (x, y, w, h))
             for (sx, sy, sw, sh) in smiles:
                 all_detections.append({
@@ -344,14 +301,11 @@ class SimpleObjectDetector:
                     'confidence': 0.9
                 })
         
-        # 2. Detect color objects
         color_detections = self.detect_color_blobs(frame)
         all_detections.extend(color_detections)
         
-        # Store for mouse clicks
         self.detections = all_detections
         
-        # Draw detections and UI
         display_frame = frame.copy()
         display_frame = self.draw_detections(display_frame, all_detections)
         display_frame = self.draw_ui(display_frame)
@@ -359,13 +313,11 @@ class SimpleObjectDetector:
         return display_frame
     
     def handle_mouse_click(self, event):
-        """Handle mouse click for object selection"""
         if not self.correction_mode or event.xdata is None or event.ydata is None:
             return
         
         x, y = int(event.xdata), int(event.ydata)
         
-        # Find clicked detection
         for detection in self.detections:
             dx, dy, dw, dh = detection['box']
             if dx <= x <= dx + dw and dy <= y <= dy + dh:
@@ -374,13 +326,11 @@ class SimpleObjectDetector:
                 return
     
     def learn_object(self, box, name):
-        """Learn/remember an object"""
         if not name.strip():
             return False
         
         x, y, w, h = box
         
-        # Store object information
         self.learned_objects[name.strip()] = {
             'position': (x, y, w, h),
             'learned_time': time.time(),
@@ -392,11 +342,9 @@ class SimpleObjectDetector:
         return True
     
     def run_matplotlib(self):
-        """Run with matplotlib display"""
         print("\nStarting with matplotlib display...")
         print("Close the plot window or press 'q' in the window to exit")
         
-        # Set up plot
         self.fig, self.ax = plt.subplots(figsize=(10, 7))
         self.img_display = self.ax.imshow(np.zeros((480, 640, 3), dtype=np.uint8))
         self.ax.axis('off')
@@ -409,34 +357,29 @@ class SimpleObjectDetector:
         
         try:
             while self.running:
-                # Process frame
                 frame = self.process_frame()
                 if frame is None:
                     break
                 
-                # Convert BGR to RGB for matplotlib
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
-                # Update display
                 self.img_display.set_data(frame_rgb)
                 self.fig.canvas.draw_idle()
                 self.fig.canvas.flush_events()
                 
-                # Small delay
-                plt.pause(0.03)
-                
-                # Check for matplotlib window close
                 if not plt.fignum_exists(self.fig.number):
+                    self.running = False
                     break
                 
-        except KeyboardInterrupt:
-            pass
+                plt.pause(0.03)
+                
+        except Exception as e:
+            print(f"Error in matplotlib display: {e}")
         finally:
             plt.close('all')
             self.cleanup()
     
     def run_no_gui(self):
-        """Run without GUI - just print to console"""
         print("\nStarting detection without GUI...")
         print("Press Ctrl+C to stop")
         
@@ -448,26 +391,25 @@ class SimpleObjectDetector:
                     break
                 
                 frame_count += 1
-                if frame_count % 30 == 0:  # Every ~1 second
+                if frame_count % 30 == 0:
                     print(f"\nFrame {frame_count}:")
                     print(f"  Detections: {len(self.detections)}")
                     print(f"  Learned objects: {len(self.learned_objects)}")
                     if self.correction_mode:
                         print(f"  Teaching: '{self.correction_text}'")
                 
-                # Check for key press from terminal
                 self.check_terminal_input()
                 
-                # Small delay
                 time.sleep(0.03)
                 
         except KeyboardInterrupt:
-            pass
+            print("\nInterrupted by user")
+        except Exception as e:
+            print(f"Error: {e}")
         finally:
             self.cleanup()
     
     def on_key_press(self, event):
-        """Handle key presses in matplotlib"""
         if event.key is None:
             return
         
@@ -501,21 +443,16 @@ class SimpleObjectDetector:
             self.save_objects()
             print("✓ Memory cleared!")
         elif self.correction_mode and len(key) == 1:
-            # Handle text input
             if key.isalnum() or key in [' ', '-', '_']:
                 self.correction_text += key
             elif key == 'backspace':
                 self.correction_text = self.correction_text[:-1]
     
     def check_terminal_input(self):
-        """Check for terminal input in no-GUI mode"""
         try:
             import select
-            import tty
-            import termios
             
-            # Check if input is available (non-blocking)
-            if select.select([sys.stdin], [], [], 0)[0]:
+            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                 key = sys.stdin.read(1)
                 self.process_key(key)
                 
@@ -523,7 +460,6 @@ class SimpleObjectDetector:
             pass
     
     def process_key(self, key):
-        """Process a single key press"""
         if key == 'q':
             self.running = False
         elif key == 'c':
@@ -531,7 +467,7 @@ class SimpleObjectDetector:
             self.correction_text = ""
             print("\n=== TEACHING MODE ===")
             print("Selected first object. Type name and press ENTER.")
-        elif key == '\n' or key == '\r':  # ENTER
+        elif key == '\n' or key == '\r':
             if self.correction_mode and self.selected_box and self.correction_text:
                 self.learn_object(self.selected_box, self.correction_text)
                 self.correction_mode = False
@@ -550,26 +486,24 @@ class SimpleObjectDetector:
             if key.isalnum() or key in [' ', '-', '_']:
                 self.correction_text += key
                 print(f"Name: {self.correction_text}")
-            elif ord(key) == 127:  # Backspace
+            elif ord(key) == 127:
                 self.correction_text = self.correction_text[:-1]
                 print(f"Name: {self.correction_text}")
     
     def cleanup(self):
-        """Clean up resources"""
         self.cap.release()
-        cv2.destroyAllWindows()
+        if hasattr(self, 'fig') and plt.fignum_exists(self.fig.number):
+            plt.close('all')
         print("\n✓ Cleaned up. Goodbye!")
     
     def run(self):
-        """Main run method"""
         if self.use_matplotlib:
             self.run_matplotlib()
         else:
             self.run_no_gui()
 
+# الدالة الرئيسية
 def main():
-    """Main function"""
-    # Try to use matplotlib, fall back to no GUI
     use_matplotlib = True
     if not MATPLOTLIB_AVAILABLE:
         print("Note: matplotlib not found, running in console mode")
