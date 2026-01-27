@@ -1,254 +1,136 @@
-#!/usr/bin/env python3
-"""
-Human Pose Estimation - Real-time Camera Application
-Advanced AI Computer Vision Project
-
-A complete, single-file application for real-time human pose estimation
-using webcam feed with a pre-trained model for optimal performance.
-"""
-
+# مكتبات استيراد
 import cv2
-import torch
-import torchvision
 import numpy as np
 import argparse
 import time
-from torchvision.models.detection import keypointrcnn_resnet50_fpn
-from torchvision.transforms import functional as F
+import mediapipe as mp
 
-class RealTimePoseEstimator:
-    """
-    Real-time Human Pose Estimator using webcam feed
-    """
+# فئة تقدير الوضعية الخفيفة
+class LitePoseEstimator:
     
-    def __init__(self, confidence_threshold=0.8, keypoint_threshold=0.5):
-        """
-        Initialize the pose estimator
+    def __init__(self, min_detection_confidence=0.5, min_tracking_confidence=0.5):
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
         
-        Args:
-            confidence_threshold: Minimum confidence for person detection
-            keypoint_threshold: Minimum confidence for keypoint detection
-        """
-        self.confidence_threshold = confidence_threshold
-        self.keypoint_threshold = keypoint_threshold
+        self.mp_pose = mp.solutions.pose
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            smooth_landmarks=True,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence
+        )
         
-        # Keypoint names (COCO format)
+        self.mp_drawing = mp.solutions.drawing_utils
+        
         self.keypoint_names = [
-            'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
-            'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
-            'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
-            'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+            'nose', 'left_eye_inner', 'left_eye', 'left_eye_outer',
+            'right_eye_inner', 'right_eye', 'right_eye_outer', 'left_ear',
+            'right_ear', 'mouth_left', 'mouth_right', 'left_shoulder',
+            'right_shoulder', 'left_elbow', 'right_elbow', 'left_wrist',
+            'right_wrist', 'left_pinky', 'right_pinky', 'left_index',
+            'right_index', 'left_thumb', 'right_thumb', 'left_hip',
+            'right_hip', 'left_knee', 'right_knee', 'left_ankle',
+            'right_ankle', 'left_heel', 'right_heel', 'left_foot_index',
+            'right_foot_index'
         ]
         
-        # Skeleton connections for visualization
         self.skeleton_connections = [
-            # Torso
-            ('left_shoulder', 'right_shoulder'),
-            ('left_shoulder', 'left_hip'),
-            ('right_shoulder', 'right_hip'),
-            ('left_hip', 'right_hip'),
-            # Left arm
-            ('left_shoulder', 'left_elbow'),
-            ('left_elbow', 'left_wrist'),
-            # Right arm
-            ('right_shoulder', 'right_elbow'),
-            ('right_elbow', 'right_wrist'),
-            # Left leg
-            ('left_hip', 'left_knee'),
-            ('left_knee', 'left_ankle'),
-            # Right leg
-            ('right_hip', 'right_knee'),
-            ('right_knee', 'right_ankle'),
-            # Face
-            ('left_eye', 'right_eye'),
-            ('nose', 'left_eye'),
-            ('nose', 'right_eye'),
-            ('left_eye', 'left_ear'),
-            ('right_eye', 'right_ear')
+            (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+            (11, 23), (23, 25), (25, 27), (27, 29), (29, 31),
+            (12, 24), (24, 26), (26, 28), (28, 30), (30, 32),
+            (23, 24), (0, 1), (1, 2), (2, 3), (3, 7),
+            (0, 4), (4, 5), (5, 6), (6, 8)
         ]
         
-        # Colors for visualization
         self.colors = {
-            'bbox': (0, 255, 0),  # Green
-            'keypoint': (0, 0, 255),  # Red
-            'skeleton': (255, 0, 0),  # Blue
-            'text': (255, 255, 255)  # White
+            'skeleton': (255, 0, 0),
+            'landmark': (0, 255, 0),
+            'text': (255, 255, 255),
+            'highlight': (0, 255, 255)
         }
         
-        # Performance tracking
         self.fps = 0
         self.frame_count = 0
         self.start_time = time.time()
         
-        # Load pre-trained model
-        self._load_model()
-        
-        # Initialize webcam
         self.cap = None
         
-    def _load_model(self):
-        """Load the pre-trained Keypoint RCNN model"""
-        print("Loading pre-trained Keypoint RCNN model...")
-        self.model = keypointrcnn_resnet50_fpn(pretrained=True)
-        self.model.eval()
-        print("✓ Model loaded successfully!")
+    def draw_custom_skeleton(self, frame, landmarks):
+        height, width, _ = frame.shape
         
-        # Move to GPU if available
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
-        print(f"✓ Model running on: {self.device}")
-        
-    def preprocess_frame(self, frame):
-        """
-        Preprocess a frame for the model
-        
-        Args:
-            frame: OpenCV BGR image
-            
-        Returns:
-            Preprocessed tensor
-        """
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Convert to tensor
-        tensor = F.to_tensor(rgb_frame)
-        
-        # Add batch dimension
-        tensor = tensor.unsqueeze(0).to(self.device)
-        
-        return tensor
-    
-    def draw_skeleton(self, frame, keypoints):
-        """
-        Draw skeleton connections on the frame
-        
-        Args:
-            frame: OpenCV frame
-            keypoints: Array of keypoints with shape (17, 3) [x, y, confidence]
-        """
-        # Draw connections
         for connection in self.skeleton_connections:
-            start_name, end_name = connection
-            start_idx = self.keypoint_names.index(start_name)
-            end_idx = self.keypoint_names.index(end_name)
+            start_idx, end_idx = connection
             
-            start_conf = keypoints[start_idx, 2]
-            end_conf = keypoints[end_idx, 2]
-            
-            # Only draw if both keypoints are confident
-            if start_conf > self.keypoint_threshold and end_conf > self.keypoint_threshold:
-                start_x, start_y = int(keypoints[start_idx, 0]), int(keypoints[start_idx, 1])
-                end_x, end_y = int(keypoints[end_idx, 0]), int(keypoints[end_idx, 1])
+            if landmarks[start_idx].visibility > 0.5 and landmarks[end_idx].visibility > 0.5:
+                start_point = (int(landmarks[start_idx].x * width), 
+                              int(landmarks[start_idx].y * height))
+                end_point = (int(landmarks[end_idx].x * width), 
+                            int(landmarks[end_idx].y * height))
                 
-                cv2.line(frame, (start_x, start_y), (end_x, end_y), 
+                cv2.line(frame, start_point, end_point, 
                         self.colors['skeleton'], 2)
     
-    def draw_keypoints(self, frame, keypoints):
-        """
-        Draw keypoints on the frame
+    def draw_custom_landmarks(self, frame, landmarks):
+        height, width, _ = frame.shape
         
-        Args:
-            frame: OpenCV frame
-            keypoints: Array of keypoints with shape (17, 3) [x, y, confidence]
-        """
-        for i, (x, y, conf) in enumerate(keypoints):
-            if conf > self.keypoint_threshold:
-                x_int, y_int = int(x), int(y)
+        for idx, landmark in enumerate(landmarks):
+            if landmark.visibility > 0.5:
+                x = int(landmark.x * width)
+                y = int(landmark.y * height)
                 
-                # Draw keypoint
-                cv2.circle(frame, (x_int, y_int), 5, self.colors['keypoint'], -1)
+                cv2.circle(frame, (x, y), 4, self.colors['landmark'], -1)
                 
-                # Optional: Draw keypoint index
-                # cv2.putText(frame, str(i), (x_int + 5, y_int - 5),
-                #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.colors['text'], 1)
+                if idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
+                    cv2.circle(frame, (x, y), 6, self.colors['highlight'], 2)
     
-    def draw_bbox(self, frame, box, label="Person", confidence=1.0):
-        """
-        Draw bounding box on the frame
-        
-        Args:
-            frame: OpenCV frame
-            box: Bounding box coordinates [x1, y1, x2, y2]
-            label: Object label
-            confidence: Detection confidence
-        """
-        x1, y1, x2, y2 = map(int, box)
-        
-        # Draw rectangle
-        cv2.rectangle(frame, (x1, y1), (x2, y2), self.colors['bbox'], 2)
-        
-        # Draw label background
-        label_text = f"{label}: {confidence:.2f}"
-        (text_width, text_height), baseline = cv2.getTextSize(
-            label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        
-        cv2.rectangle(frame, (x1, y1 - text_height - 10), 
-                     (x1 + text_width, y1), self.colors['bbox'], -1)
-        
-        # Draw label text
-        cv2.putText(frame, label_text, (x1, y1 - 5),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.colors['text'], 2)
-    
-    def calculate_angles(self, keypoints):
-        """
-        Calculate joint angles for pose analysis
-        
-        Args:
-            keypoints: Array of keypoints with shape (17, 3)
-            
-        Returns:
-            Dictionary of joint angles
-        """
+    def calculate_angles(self, landmarks, frame_shape):
         angles = {}
+        height, width = frame_shape[:2]
         
-        # Helper function to calculate angle between three points
-        def angle_between(p1, p2, p3):
-            if p1[2] < self.keypoint_threshold or p2[2] < self.keypoint_threshold or p3[2] < self.keypoint_threshold:
+        def get_point(idx):
+            if landmarks[idx].visibility > 0.5:
+                return np.array([landmarks[idx].x * width, landmarks[idx].y * height])
+            return None
+        
+        def calculate_angle(p1, p2, p3):
+            if p1 is None or p2 is None or p3 is None:
                 return None
             
-            # Convert to vectors
-            v1 = np.array([p1[0] - p2[0], p1[1] - p2[1]])
-            v2 = np.array([p3[0] - p2[0], p3[1] - p2[1]])
+            v1 = p1 - p2
+            v2 = p3 - p2
             
-            # Calculate angle
             dot_product = np.dot(v1, v2)
             norm_product = np.linalg.norm(v1) * np.linalg.norm(v2)
             
             if norm_product == 0:
                 return None
             
-            cosine = dot_product / norm_product
-            cosine = np.clip(cosine, -1, 1)  # Ensure valid range
+            cosine = np.clip(dot_product / norm_product, -1.0, 1.0)
             angle = np.degrees(np.arccos(cosine))
             
             return angle
         
-        # Calculate elbow angles
-        left_elbow_angle = angle_between(
-            keypoints[self.keypoint_names.index('left_shoulder')],
-            keypoints[self.keypoint_names.index('left_elbow')],
-            keypoints[self.keypoint_names.index('left_wrist')]
-        )
+        left_shoulder = get_point(11)
+        left_elbow = get_point(13)
+        left_wrist = get_point(15)
         
-        right_elbow_angle = angle_between(
-            keypoints[self.keypoint_names.index('right_shoulder')],
-            keypoints[self.keypoint_names.index('right_elbow')],
-            keypoints[self.keypoint_names.index('right_wrist')]
-        )
+        right_shoulder = get_point(12)
+        right_elbow = get_point(14)
+        right_wrist = get_point(16)
         
-        # Calculate knee angles
-        left_knee_angle = angle_between(
-            keypoints[self.keypoint_names.index('left_hip')],
-            keypoints[self.keypoint_names.index('left_knee')],
-            keypoints[self.keypoint_names.index('left_ankle')]
-        )
+        left_hip = get_point(23)
+        left_knee = get_point(25)
+        left_ankle = get_point(27)
         
-        right_knee_angle = angle_between(
-            keypoints[self.keypoint_names.index('right_hip')],
-            keypoints[self.keypoint_names.index('right_knee')],
-            keypoints[self.keypoint_names.index('right_ankle')]
-        )
+        right_hip = get_point(24)
+        right_knee = get_point(26)
+        right_ankle = get_point(28)
+        
+        left_elbow_angle = calculate_angle(left_shoulder, left_elbow, left_wrist)
+        right_elbow_angle = calculate_angle(right_shoulder, right_elbow, right_wrist)
+        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
+        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
         
         if left_elbow_angle is not None:
             angles['left_elbow'] = left_elbow_angle
@@ -261,211 +143,203 @@ class RealTimePoseEstimator:
             
         return angles
     
-    def draw_angles(self, frame, keypoints, angles):
-        """
-        Draw joint angles on the frame
+    def draw_angles(self, frame, landmarks, angles):
+        height, width, _ = frame.shape
         
-        Args:
-            frame: OpenCV frame
-            keypoints: Array of keypoints
-            angles: Dictionary of joint angles
-        """
-        # Map angles to keypoint positions for drawing
         angle_positions = {
-            'left_elbow': self.keypoint_names.index('left_elbow'),
-            'right_elbow': self.keypoint_names.index('right_elbow'),
-            'left_knee': self.keypoint_names.index('left_knee'),
-            'right_knee': self.keypoint_names.index('right_knee')
+            'left_elbow': 13,
+            'right_elbow': 14,
+            'left_knee': 25,
+            'right_knee': 26
         }
         
         for joint, angle in angles.items():
             if joint in angle_positions:
                 idx = angle_positions[joint]
-                if keypoints[idx, 2] > self.keypoint_threshold:
-                    x, y = int(keypoints[idx, 0]), int(keypoints[idx, 1])
+                if landmarks[idx].visibility > 0.5:
+                    x = int(landmarks[idx].x * width)
+                    y = int(landmarks[idx].y * height)
                     
-                    # Draw angle text
                     angle_text = f"{int(angle)}°"
                     cv2.putText(frame, angle_text, (x + 10, y - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    def draw_posture_feedback(self, frame, angles):
+        feedback = []
+        y_offset = 60
+        
+        if 'left_elbow' in angles:
+            if angles['left_elbow'] < 60:
+                feedback.append("Bend left arm more")
+            elif angles['left_elbow'] > 160:
+                feedback.append("Straighten left arm")
+                
+        if 'right_elbow' in angles:
+            if angles['right_elbow'] < 60:
+                feedback.append("Bend right arm more")
+            elif angles['right_elbow'] > 160:
+                feedback.append("Straighten right arm")
+                
+        for i, text in enumerate(feedback):
+            cv2.putText(frame, text, (10, y_offset + i * 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
     
     def process_frame(self, frame):
-        """
-        Process a single frame for pose estimation
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame.flags.writeable = False
         
-        Args:
-            frame: OpenCV BGR image
-            
-        Returns:
-            Processed frame with pose estimation visualization
-        """
-        # Preprocess frame
-        input_tensor = self.preprocess_frame(frame)
+        results = self.pose.process(rgb_frame)
         
-        # Run inference
-        with torch.no_grad():
-            predictions = self.model(input_tensor)
-        
-        # Move predictions to CPU if needed
-        predictions = [{k: v.cpu() for k, v in p.items()} for p in predictions]
-        
-        # Process each detected person
-        boxes = predictions[0]['boxes'].numpy()
-        keypoints = predictions[0]['keypoints'].numpy()
-        scores = predictions[0]['scores'].numpy()
+        rgb_frame.flags.writeable = True
         
         person_count = 0
         
-        for i, (box, keypoint_set, score) in enumerate(zip(boxes, keypoints, scores)):
-            if score < self.confidence_threshold:
-                continue
-                
-            person_count += 1
+        if results.pose_landmarks:
+            person_count = 1
             
-            # Draw bounding box
-            self.draw_bbox(frame, box, confidence=score)
+            self.draw_custom_skeleton(frame, results.pose_landmarks.landmark)
+            self.draw_custom_landmarks(frame, results.pose_landmarks.landmark)
             
-            # Draw skeleton
-            self.draw_skeleton(frame, keypoint_set)
+            angles = self.calculate_angles(results.pose_landmarks.landmark, frame.shape)
+            self.draw_angles(frame, results.pose_landmarks.landmark, angles)
+            self.draw_posture_feedback(frame, angles)
             
-            # Draw keypoints
-            self.draw_keypoints(frame, keypoint_set)
-            
-            # Calculate and draw angles
-            angles = self.calculate_angles(keypoint_set)
-            self.draw_angles(frame, keypoint_set, angles)
+            self.mp_drawing.draw_landmarks(
+                frame,
+                results.pose_landmarks,
+                self.mp_pose.POSE_CONNECTIONS,
+                self.mp_drawing.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
+                self.mp_drawing.DrawingSpec(color=(245, 66, 230), thickness=2, circle_radius=2)
+            )
         
         return frame, person_count
     
-    def draw_performance_stats(self, frame):
-        """
-        Draw performance statistics on the frame
-        
-        Args:
-            frame: OpenCV frame
-            
-        Returns:
-            Frame with statistics overlay
-        """
-        # Calculate FPS
+    def draw_stats(self, frame):
         self.frame_count += 1
         elapsed_time = time.time() - self.start_time
         
-        if elapsed_time > 1:  # Update FPS every second
+        if elapsed_time >= 1:
             self.fps = self.frame_count / elapsed_time
             self.frame_count = 0
             self.start_time = time.time()
         
-        # Draw stats overlay
-        stats_y = 30
         stats = [
             f"FPS: {self.fps:.1f}",
-            f"Confidence Threshold: {self.confidence_threshold}",
-            f"Device: {self.device}",
+            f"Confidence: {self.min_detection_confidence:.1f}",
             "Press 'q' to quit",
-            "Press '+' to increase confidence",
-            "Press '-' to decrease confidence"
+            "Press '+'/- to adjust confidence",
+            "Press '1/2/3' to change model"
         ]
         
         for i, stat in enumerate(stats):
-            cv2.putText(frame, stat, (10, stats_y + i * 25),
+            cv2.putText(frame, stat, (10, 30 + i * 25),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.colors['text'], 2)
         
         return frame
     
-    def run(self, camera_id=0, window_name="Human Pose Estimation"):
-        """
-        Run real-time pose estimation from webcam
-        
-        Args:
-            camera_id: Camera device ID
-            window_name: Name of the display window
-        """
-        # Initialize webcam
+    def run(self, camera_id=0):
         self.cap = cv2.VideoCapture(camera_id)
         
         if not self.cap.isOpened():
-            print(f"Error: Could not open camera {camera_id}")
+            print(f"Cannot open camera {camera_id}")
             return
         
-        print(f"\nStarting real-time pose estimation...")
-        print("Press 'q' to quit")
-        print("Press '+' to increase confidence threshold")
-        print("Press '-' to decrease confidence threshold")
-        print("Press 'r' to reset to default threshold")
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         
-        try:
-            while True:
-                # Capture frame
-                ret, frame = self.cap.read()
-                if not ret:
-                    print("Error: Failed to capture frame")
-                    break
-                
-                # Process frame
-                processed_frame, person_count = self.process_frame(frame)
-                
-                # Add person count
-                cv2.putText(processed_frame, f"Persons: {person_count}", 
-                           (frame.shape[1] - 150, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                
-                # Add performance stats
-                processed_frame = self.draw_performance_stats(processed_frame)
-                
-                # Display frame
-                cv2.imshow(window_name, processed_frame)
-                
-                # Handle keyboard input
-                key = cv2.waitKey(1) & 0xFF
-                
-                if key == ord('q'):
-                    print("\nQuitting...")
-                    break
-                elif key == ord('+'):
-                    self.confidence_threshold = min(0.95, self.confidence_threshold + 0.05)
-                    print(f"Confidence threshold increased to {self.confidence_threshold:.2f}")
-                elif key == ord('-'):
-                    self.confidence_threshold = max(0.1, self.confidence_threshold - 0.05)
-                    print(f"Confidence threshold decreased to {self.confidence_threshold:.2f}")
-                elif key == ord('r'):
-                    self.confidence_threshold = 0.8
-                    print(f"Confidence threshold reset to {self.confidence_threshold:.2f}")
-                elif key == ord('s'):
-                    # Save current frame
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    filename = f"pose_estimation_{timestamp}.jpg"
-                    cv2.imwrite(filename, processed_frame)
-                    print(f"Frame saved as {filename}")
-                
-        except KeyboardInterrupt:
-            print("\nInterrupted by user")
-        finally:
-            # Cleanup
-            if self.cap:
-                self.cap.release()
-            cv2.destroyAllWindows()
-            print("\nApplication closed")
+        print("\nStarting Lite Pose Estimation")
+        print("Controls:")
+        print("  q - Quit")
+        print("  + - Increase confidence")
+        print("  - - Decrease confidence")
+        print("  1 - Light model (fastest)")
+        print("  2 - Balanced model")
+        print("  3 - Heavy model (most accurate)")
+        print("  s - Save screenshot")
+        
+        model_complexity = 1
+        
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            
+            frame = cv2.flip(frame, 1)
+            
+            processed_frame, person_count = self.process_frame(frame)
+            
+            cv2.putText(processed_frame, f"Persons: {person_count}", 
+                       (processed_frame.shape[1] - 120, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            self.draw_stats(processed_frame)
+            
+            cv2.imshow('Lite Pose Estimation', processed_frame)
+            
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('q'):
+                break
+            elif key == ord('+'):
+                self.min_detection_confidence = min(0.9, self.min_detection_confidence + 0.1)
+                self.min_tracking_confidence = min(0.9, self.min_tracking_confidence + 0.1)
+                self.update_model(model_complexity)
+                print(f"Confidence: {self.min_detection_confidence:.1f}")
+            elif key == ord('-'):
+                self.min_detection_confidence = max(0.1, self.min_detection_confidence - 0.1)
+                self.min_tracking_confidence = max(0.1, self.min_tracking_confidence - 0.1)
+                self.update_model(model_complexity)
+                print(f"Confidence: {self.min_detection_confidence:.1f}")
+            elif key == ord('1'):
+                model_complexity = 0
+                self.update_model(0)
+                print("Using light model")
+            elif key == ord('2'):
+                model_complexity = 1
+                self.update_model(1)
+                print("Using balanced model")
+            elif key == ord('3'):
+                model_complexity = 2
+                self.update_model(2)
+                print("Using heavy model")
+            elif key == ord('s'):
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = f"pose_{timestamp}.jpg"
+                cv2.imwrite(filename, processed_frame)
+                print(f"Saved: {filename}")
+        
+        self.cap.release()
+        cv2.destroyAllWindows()
+        self.pose.close()
+    
+    def update_model(self, complexity):
+        self.pose.close()
+        self.pose = self.mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=complexity,
+            smooth_landmarks=True,
+            min_detection_confidence=self.min_detection_confidence,
+            min_tracking_confidence=self.min_tracking_confidence
+        )
 
+# فئة الوظيفة الرئيسية
 def main():
-    """Main function to run the pose estimator"""
-    parser = argparse.ArgumentParser(description='Real-time Human Pose Estimation')
+    parser = argparse.ArgumentParser(description='Lite Human Pose Estimation')
     parser.add_argument('--camera', type=int, default=0,
-                       help='Camera device ID (default: 0)')
-    parser.add_argument('--confidence', type=float, default=0.8,
-                       help='Confidence threshold for detection (default: 0.8)')
-    parser.add_argument('--keypoint-threshold', type=float, default=0.5,
-                       help='Confidence threshold for keypoints (default: 0.5)')
+                       help='Camera ID (default: 0)')
+    parser.add_argument('--confidence', type=float, default=0.5,
+                       help='Detection confidence (default: 0.5)')
     
     args = parser.parse_args()
     
-    # Create and run pose estimator
-    estimator = RealTimePoseEstimator(
-        confidence_threshold=args.confidence,
-        keypoint_threshold=args.keypoint_threshold
+    estimator = LitePoseEstimator(
+        min_detection_confidence=args.confidence,
+        min_tracking_confidence=args.confidence
     )
     
     estimator.run(camera_id=args.camera)
 
+# فئة نقطة بدء البرنامج
 if __name__ == "__main__":
     main()
