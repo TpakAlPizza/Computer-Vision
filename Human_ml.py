@@ -1,220 +1,258 @@
-# استيراد المكتبات 
+# استيراد المكتبات الأساسية
 import cv2
 import numpy as np
 import argparse
 import time
-import mediapipe as mp
+import os
+from collections import deque
 
-# فئة تقدير الوضعية الخفيفة
-class LitePoseEstimator:
-    
-    def __init__(self, min_detection_confidence=0.5, min_tracking_confidence=0.5):
-        self.min_detection_confidence = min_detection_confidence
-        self.min_tracking_confidence = min_tracking_confidence
+# محاولة استيراد YOLO
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    print("Installing ultralytics...")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics"])
+    from ultralytics import YOLO
+
+class AccuratePoseTracker:
+    def __init__(self, model_size='n'):
+        """
+        تهيئة متتبع الوضعية باستخدام YOLOv8
         
-        self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            smooth_landmarks=True,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
-        )
-        
-        self.mp_drawing = mp.solutions.drawing_utils
-        
-        self.keypoint_names = [
-            'nose', 'left_eye_inner', 'left_eye', 'left_eye_outer',
-            'right_eye_inner', 'right_eye', 'right_eye_outer', 'left_ear',
-            'right_ear', 'mouth_left', 'mouth_right', 'left_shoulder',
-            'right_shoulder', 'left_elbow', 'right_elbow', 'left_wrist',
-            'right_wrist', 'left_pinky', 'right_pinky', 'left_index',
-            'right_index', 'left_thumb', 'right_thumb', 'left_hip',
-            'right_hip', 'left_knee', 'right_knee', 'left_ankle',
-            'right_ankle', 'left_heel', 'right_heel', 'left_foot_index',
-            'right_foot_index'
-        ]
-        
-        self.skeleton_connections = [
-            (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
-            (11, 23), (23, 25), (25, 27), (27, 29), (29, 31),
-            (12, 24), (24, 26), (26, 28), (28, 30), (30, 32),
-            (23, 24), (0, 1), (1, 2), (2, 3), (3, 7),
-            (0, 4), (4, 5), (5, 6), (6, 8)
-        ]
-        
-        self.colors = {
-            'skeleton': (255, 0, 0),
-            'landmark': (0, 255, 0),
-            'text': (255, 255, 255),
-            'highlight': (0, 255, 255)
+        Args:
+            model_size: حجم النموذج:
+                'n' = nano (الأصغر والأسرع - 6MB)
+                's' = small (صغير - 22MB)
+                'm' = medium (متوسط - 50MB)
+                'l' = large (كبير - 76MB)
+        """
+        # تحويل حجم النموذج إلى التسمية الصحيحة
+        model_sizes = {
+            'n': 'nano',
+            's': 'small', 
+            'm': 'medium',
+            'l': 'large'
         }
         
+        model_name = f'yolov8{model_size}-pose.pt'
+        print(f"Loading {model_sizes.get(model_size, model_size)} model: {model_name}")
+        print("This may download the model on first run (6-76 MB depending on size)...")
+        
+        # تحميل النموذج (سيقوم بتنزيله تلقائياً إذا لم يكن موجوداً)
+        self.model = YOLO(model_name)
+        
+        # مفاصل الجسم في YOLOv8 (17 نقطة)
+        self.keypoint_names = [
+            'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+            'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+            'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+            'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+        ]
+        
+        # روابط العظام
+        self.skeleton = [
+            (0, 1), (0, 2), (1, 3), (2, 4),  # الرأس
+            (5, 6), (5, 7), (7, 9),  # الذراع الأيسر
+            (6, 8), (8, 10),  # الذراع الأيمن
+            (5, 11), (6, 12),  # الجسم العلوي
+            (11, 13), (13, 15),  # الرجل اليسرى
+            (12, 14), (14, 16),  # الرجل اليمنى
+            (11, 12)  # الحوض
+        ]
+        
+        # ألوان للعظام
+        self.skeleton_colors = [
+            (255, 100, 100), (255, 150, 100), (255, 200, 100), (255, 255, 100),
+            (100, 255, 100), (100, 255, 150), (100, 255, 200),
+            (100, 200, 255), (100, 150, 255),
+            (100, 100, 255), (150, 100, 255),
+            (200, 100, 255), (255, 100, 255),
+            (255, 100, 200), (255, 100, 150),
+            (200, 200, 200)
+        ]
+        
+        # ألوان للمفاصل
+        self.joint_colors = [
+            (255, 0, 0),     # أحمر للأنف
+            (0, 255, 0),     # أخضر للعيون
+            (0, 255, 0),
+            (0, 0, 255),     # أزرق للأذنين
+            (0, 0, 255),
+            (255, 255, 0),   # سماوي للأكتاف
+            (255, 255, 0),
+            (255, 0, 255),   # بنفسجي للمرفقين
+            (255, 0, 255),
+            (0, 255, 255),   # أصفر للمعصمين
+            (0, 255, 255),
+            (128, 0, 128),   # بنفسجي غامق للوركين
+            (128, 0, 128),
+            (255, 165, 0),   # برتقالي للركبتين
+            (255, 165, 0),
+            (0, 128, 128),   # تركواز للكاحلين
+            (0, 128, 128)
+        ]
+        
+        # إعدادات
+        self.conf_threshold = 0.5
+        self.joint_size = 8
+        self.bone_thickness = 3
+        
+        # لتنعيم الحركة
+        self.pose_history = deque(maxlen=3)
+        
+        # إحصائيات
         self.fps = 0
         self.frame_count = 0
         self.start_time = time.time()
+        self.inference_time = 0
         
-        self.cap = None
-        
-    def draw_custom_skeleton(self, frame, landmarks):
-        height, width, _ = frame.shape
-        
-        for connection in self.skeleton_connections:
-            start_idx, end_idx = connection
-            
-            if landmarks[start_idx].visibility > 0.5 and landmarks[end_idx].visibility > 0.5:
-                start_point = (int(landmarks[start_idx].x * width), 
-                              int(landmarks[start_idx].y * height))
-                end_point = (int(landmarks[end_idx].x * width), 
-                            int(landmarks[end_idx].y * height))
-                
-                cv2.line(frame, start_point, end_point, 
-                        self.colors['skeleton'], 2)
+        print(f"Model loaded successfully!")
     
-    def draw_custom_landmarks(self, frame, landmarks):
-        height, width, _ = frame.shape
+    def get_keypoints_from_results(self, results):
+        """استخراج النقاط من نتائج YOLO"""
+        if results[0].keypoints is None:
+            return []
         
-        for idx, landmark in enumerate(landmarks):
-            if landmark.visibility > 0.5:
-                x = int(landmark.x * width)
-                y = int(landmark.y * height)
-                
-                cv2.circle(frame, (x, y), 4, self.colors['landmark'], -1)
-                
-                if idx in [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]:
-                    cv2.circle(frame, (x, y), 6, self.colors['highlight'], 2)
+        keypoints_data = results[0].keypoints.data.cpu().numpy()
+        if len(keypoints_data) == 0:
+            return []
+        
+        # اختيار الشخص مع معظم النقاط المرئية
+        best_idx = 0
+        max_visible = 0
+        
+        for i, person_kpts in enumerate(keypoints_data):
+            visible = np.sum(person_kpts[:, 2] > 0.3)
+            if visible > max_visible:
+                max_visible = visible
+                best_idx = i
+        
+        return keypoints_data[best_idx]
     
-    def calculate_angles(self, landmarks, frame_shape):
+    def smooth_keypoints(self, keypoints):
+        """تنعيم حركة النقاط"""
+        if len(self.pose_history) == 0:
+            self.pose_history.append(keypoints)
+            return keypoints
+        
+        smoothed = keypoints.copy()
+        
+        # إذا كان لدينا تاريخ، ننعم النقاط
+        if len(self.pose_history) > 0:
+            for i in range(len(keypoints)):
+                if keypoints[i, 2] > 0.3:  # إذا كانت النقطة مرئية
+                    # جمع القيم التاريخية
+                    points = [keypoints[i, :2]]
+                    for hist in self.pose_history:
+                        if hist[i, 2] > 0.3:
+                            points.append(hist[i, :2])
+                    
+                    if len(points) > 1:
+                        # حساب المتوسط
+                        avg_x = np.mean([p[0] for p in points])
+                        avg_y = np.mean([p[1] for p in points])
+                        smoothed[i, 0] = avg_x
+                        smoothed[i, 1] = avg_y
+        
+        self.pose_history.append(smoothed)
+        return smoothed
+    
+    def calculate_angles(self, keypoints):
+        """حساب زوايا المفاصل"""
         angles = {}
-        height, width = frame_shape[:2]
         
         def get_point(idx):
-            if landmarks[idx].visibility > 0.5:
-                return np.array([landmarks[idx].x * width, landmarks[idx].y * height])
+            if keypoints[idx, 2] > 0.3:  # ثقة كافية
+                return np.array([keypoints[idx, 0], keypoints[idx, 1]])
             return None
         
-        def calculate_angle(p1, p2, p3):
-            if p1 is None or p2 is None or p3 is None:
+        def calculate_angle(a, b, c):
+            if a is None or b is None or c is None:
                 return None
             
-            v1 = p1 - p2
-            v2 = p3 - p2
+            ba = a - b
+            bc = c - b
             
-            dot_product = np.dot(v1, v2)
-            norm_product = np.linalg.norm(v1) * np.linalg.norm(v2)
-            
-            if norm_product == 0:
-                return None
-            
-            cosine = np.clip(dot_product / norm_product, -1.0, 1.0)
-            angle = np.degrees(np.arccos(cosine))
-            
+            cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+            angle = np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
             return angle
         
-        left_shoulder = get_point(11)
-        left_elbow = get_point(13)
-        left_wrist = get_point(15)
+        # زوايا الذراع الأيسر
+        left_shoulder = get_point(5)
+        left_elbow = get_point(7)
+        left_wrist = get_point(9)
         
-        right_shoulder = get_point(12)
-        right_elbow = get_point(14)
-        right_wrist = get_point(16)
+        if all(p is not None for p in [left_shoulder, left_elbow, left_wrist]):
+            angles['left_elbow'] = calculate_angle(left_shoulder, left_elbow, left_wrist)
         
-        left_hip = get_point(23)
-        left_knee = get_point(25)
-        left_ankle = get_point(27)
+        # زوايا الذراع الأيمن
+        right_shoulder = get_point(6)
+        right_elbow = get_point(8)
+        right_wrist = get_point(10)
         
-        right_hip = get_point(24)
-        right_knee = get_point(26)
-        right_ankle = get_point(28)
+        if all(p is not None for p in [right_shoulder, right_elbow, right_wrist]):
+            angles['right_elbow'] = calculate_angle(right_shoulder, right_elbow, right_wrist)
         
-        left_elbow_angle = calculate_angle(left_shoulder, left_elbow, left_wrist)
-        right_elbow_angle = calculate_angle(right_shoulder, right_elbow, right_wrist)
-        left_knee_angle = calculate_angle(left_hip, left_knee, left_ankle)
-        right_knee_angle = calculate_angle(right_hip, right_knee, right_ankle)
+        # زوايا الرجل اليسرى
+        left_hip = get_point(11)
+        left_knee = get_point(13)
+        left_ankle = get_point(15)
         
-        if left_elbow_angle is not None:
-            angles['left_elbow'] = left_elbow_angle
-        if right_elbow_angle is not None:
-            angles['right_elbow'] = right_elbow_angle
-        if left_knee_angle is not None:
-            angles['left_knee'] = left_knee_angle
-        if right_knee_angle is not None:
-            angles['right_knee'] = right_knee_angle
-            
+        if all(p is not None for p in [left_hip, left_knee, left_ankle]):
+            angles['left_knee'] = calculate_angle(left_hip, left_knee, left_ankle)
+        
+        # زوايا الرجل اليمنى
+        right_hip = get_point(12)
+        right_knee = get_point(14)
+        right_ankle = get_point(16)
+        
+        if all(p is not None for p in [right_hip, right_knee, right_ankle]):
+            angles['right_knee'] = calculate_angle(right_hip, right_knee, right_ankle)
+        
         return angles
     
-    def draw_angles(self, frame, landmarks, angles):
-        height, width, _ = frame.shape
+    def draw_skeleton(self, frame, keypoints):
+        """رسم الهيكل العظمي على الإطار"""
+        h, w = frame.shape[:2]
         
-        angle_positions = {
-            'left_elbow': 13,
-            'right_elbow': 14,
-            'left_knee': 25,
-            'right_knee': 26
-        }
-        
-        for joint, angle in angles.items():
-            if joint in angle_positions:
-                idx = angle_positions[joint]
-                if landmarks[idx].visibility > 0.5:
-                    x = int(landmarks[idx].x * width)
-                    y = int(landmarks[idx].y * height)
+        # رسم العظام
+        for i, (start_idx, end_idx) in enumerate(self.skeleton):
+            if (keypoints[start_idx, 2] > 0.3 and keypoints[end_idx, 2] > 0.3):
+                start_pt = (int(keypoints[start_idx, 0]), int(keypoints[start_idx, 1]))
+                end_pt = (int(keypoints[end_idx, 0]), int(keypoints[end_idx, 1]))
+                
+                # التأكد من أن النقاط داخل الإطار
+                if (0 <= start_pt[0] < w and 0 <= start_pt[1] < h and
+                    0 <= end_pt[0] < w and 0 <= end_pt[1] < h):
                     
-                    angle_text = f"{int(angle)}°"
-                    cv2.putText(frame, angle_text, (x + 10, y - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    
-    def draw_posture_feedback(self, frame, angles):
-        feedback = []
-        y_offset = 60
+                    color = self.skeleton_colors[i % len(self.skeleton_colors)]
+                    cv2.line(frame, start_pt, end_pt, color, self.bone_thickness)
         
-        if 'left_elbow' in angles:
-            if angles['left_elbow'] < 60:
-                feedback.append("Bend left arm more")
-            elif angles['left_elbow'] > 160:
-                feedback.append("Straighten left arm")
+        # رسم المفاصل
+        for i in range(len(keypoints)):
+            if keypoints[i, 2] > 0.3:  # إذا كانت النقطة مرئية
+                x = int(keypoints[i, 0])
+                y = int(keypoints[i, 1])
+                conf = keypoints[i, 2]
                 
-        if 'right_elbow' in angles:
-            if angles['right_elbow'] < 60:
-                feedback.append("Bend right arm more")
-            elif angles['right_elbow'] > 160:
-                feedback.append("Straighten right arm")
-                
-        for i, text in enumerate(feedback):
-            cv2.putText(frame, text, (10, y_offset + i * 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                # التأكد من أن النقطة داخل الإطار
+                if 0 <= x < w and 0 <= y < h:
+                    size = int(self.joint_size * (0.5 + conf * 0.5))
+                    color = self.joint_colors[i % len(self.joint_colors)]
+                    
+                    # رسم دائرة سوداء خلفية
+                    cv2.circle(frame, (x, y), size + 2, (0, 0, 0), -1)
+                    # رسم المفصل
+                    cv2.circle(frame, (x, y), size, color, -1)
+                    # نقطة مركزية بيضاء
+                    cv2.circle(frame, (x, y), max(2, size // 3), (255, 255, 255), -1)
     
-    def process_frame(self, frame):
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb_frame.flags.writeable = False
-        
-        results = self.pose.process(rgb_frame)
-        
-        rgb_frame.flags.writeable = True
-        
-        person_count = 0
-        
-        if results.pose_landmarks:
-            person_count = 1
-            
-            self.draw_custom_skeleton(frame, results.pose_landmarks.landmark)
-            self.draw_custom_landmarks(frame, results.pose_landmarks.landmark)
-            
-            angles = self.calculate_angles(results.pose_landmarks.landmark, frame.shape)
-            self.draw_angles(frame, results.pose_landmarks.landmark, angles)
-            self.draw_posture_feedback(frame, angles)
-            
-            self.mp_drawing.draw_landmarks(
-                frame,
-                results.pose_landmarks,
-                self.mp_pose.POSE_CONNECTIONS,
-                self.mp_drawing.DrawingSpec(color=(245, 117, 66), thickness=2, circle_radius=2),
-                self.mp_drawing.DrawingSpec(color=(245, 66, 230), thickness=2, circle_radius=2)
-            )
-        
-        return frame, person_count
-    
-    def draw_stats(self, frame):
+    def draw_info(self, frame, angles, inference_time, num_persons):
+        """رسم المعلومات على الشاشة"""
+        # حساب FPS
         self.frame_count += 1
         elapsed_time = time.time() - self.start_time
         
@@ -223,124 +261,164 @@ class LitePoseEstimator:
             self.frame_count = 0
             self.start_time = time.time()
         
+        # رسم الإحصائيات
+        stats_y = 30
         stats = [
             f"FPS: {self.fps:.1f}",
-            f"Confidence: {self.min_detection_confidence:.1f}",
-            "Press 'q' to quit",
-            "Press '+'/- to adjust confidence",
-            "Press '1/2/3' to change model"
+            f"Persons: {num_persons}",
+            f"Inference: {inference_time:.0f}ms",
+            f"Confidence: {self.conf_threshold:.2f}",
+            "Q: Quit  +/-: Adjust confidence",
+            "S: Save screenshot"
         ]
         
-        for i, stat in enumerate(stats):
-            cv2.putText(frame, stat, (10, 30 + i * 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.colors['text'], 2)
+        for i, text in enumerate(stats):
+            color = (255, 255, 255)
+            if i == 0:
+                if self.fps < 20:
+                    color = (0, 165, 255)  # برتقالي إذا كان FPS منخفضاً
+                else:
+                    color = (0, 255, 0)  # أخضر إذا كان FPS جيداً
+            
+            cv2.putText(frame, text, (10, stats_y + i * 25),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
-        return frame
+        # رسم الزوايا
+        if angles:
+            angles_y = 180
+            cv2.putText(frame, "Joint Angles:", (10, angles_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            angles_y += 25
+            
+            for angle_name, angle_value in angles.items():
+                if angle_value is not None:
+                    text = f"{angle_name}: {int(angle_value)}°"
+                    cv2.putText(frame, text, (10, angles_y),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    angles_y += 25
+    
+    def process_frame(self, frame):
+        """معالجة إطار واحد"""
+        start_time = time.time()
+        
+        # تشغيل النموذج
+        results = self.model(frame, 
+                           conf=self.conf_threshold,
+                           iou=0.45,
+                           verbose=False,
+                           max_det=1)  # اكتشاف شخص واحد فقط لتحسين الأداء
+        
+        self.inference_time = (time.time() - start_time) * 1000
+        
+        output_frame = frame.copy()
+        num_persons = 0
+        
+        if results[0].keypoints is not None:
+            keypoints = self.get_keypoints_from_results(results)
+            
+            if len(keypoints) > 0:
+                num_persons = 1
+                
+                # تنعيم حركة النقاط
+                smoothed_kpts = self.smooth_keypoints(keypoints)
+                
+                # حساب الزوايا
+                angles = self.calculate_angles(smoothed_kpts)
+                
+                # رسم الهيكل العظمي
+                self.draw_skeleton(output_frame, smoothed_kpts)
+                
+                # رسم مربع حول الشخص
+                if results[0].boxes is not None and len(results[0].boxes) > 0:
+                    box = results[0].boxes.data[0].cpu().numpy()
+                    x1, y1, x2, y2 = map(int, box[:4])
+                    cv2.rectangle(output_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        
+        return output_frame, num_persons
     
     def run(self, camera_id=0):
-        self.cap = cv2.VideoCapture(camera_id)
+        """تشغيل المتتبع"""
+        cap = cv2.VideoCapture(camera_id)
         
-        if not self.cap.isOpened():
-            print(f"Cannot open camera {camera_id}")
+        if not cap.isOpened():
+            print(f"Error: Cannot open camera {camera_id}")
             return
         
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        # إعدادات الكاميرا لتحسين الأداء
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
         
-        print("\nStarting Lite Pose Estimation")
+        print("\n" + "="*50)
+        print("Accurate Pose Tracker Started!")
+        print("="*50)
         print("Controls:")
-        print("  q - Quit")
-        print("  + - Increase confidence")
-        print("  - - Decrease confidence")
-        print("  1 - Light model (fastest)")
-        print("  2 - Balanced model")
-        print("  3 - Heavy model (most accurate)")
-        print("  s - Save screenshot")
+        print("  Q - Quit")
+        print("  + - Increase confidence threshold")
+        print("  - - Decrease confidence threshold")
+        print("  S - Save screenshot")
+        print("="*50)
         
-        model_complexity = 1
+        angles = {}
         
         while True:
-            ret, frame = self.cap.read()
+            ret, frame = cap.read()
             if not ret:
+                print("Error: Cannot read frame")
                 break
             
+            # قلب الإطار
             frame = cv2.flip(frame, 1)
             
-            processed_frame, person_count = self.process_frame(frame)
+            # معالجة الإطار
+            processed_frame, num_persons = self.process_frame(frame)
             
-            cv2.putText(processed_frame, f"Persons: {person_count}", 
-                       (processed_frame.shape[1] - 120, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            # حساب الزوايا
+            if num_persons > 0:
+                results = self.model(frame, conf=self.conf_threshold, verbose=False, max_det=1)
+                keypoints = self.get_keypoints_from_results(results)
+                if len(keypoints) > 0:
+                    angles = self.calculate_angles(keypoints)
             
-            self.draw_stats(processed_frame)
+            # رسم المعلومات
+            self.draw_info(processed_frame, angles, self.inference_time, num_persons)
             
-            cv2.imshow('Lite Pose Estimation', processed_frame)
+            # عرض الإطار
+            cv2.imshow('Accurate Pose Tracker', processed_frame)
             
+            # معالجة الأوامر
             key = cv2.waitKey(1) & 0xFF
             
-            if key == ord('q'):
+            if key == ord('q') or key == 27:
                 break
             elif key == ord('+'):
-                self.min_detection_confidence = min(0.9, self.min_detection_confidence + 0.1)
-                self.min_tracking_confidence = min(0.9, self.min_tracking_confidence + 0.1)
-                self.update_model(model_complexity)
-                print(f"Confidence: {self.min_detection_confidence:.1f}")
+                self.conf_threshold = min(0.9, self.conf_threshold + 0.05)
+                print(f"Confidence threshold: {self.conf_threshold:.2f}")
             elif key == ord('-'):
-                self.min_detection_confidence = max(0.1, self.min_detection_confidence - 0.1)
-                self.min_tracking_confidence = max(0.1, self.min_tracking_confidence - 0.1)
-                self.update_model(model_complexity)
-                print(f"Confidence: {self.min_detection_confidence:.1f}")
-            elif key == ord('1'):
-                model_complexity = 0
-                self.update_model(0)
-                print("Using light model")
-            elif key == ord('2'):
-                model_complexity = 1
-                self.update_model(1)
-                print("Using balanced model")
-            elif key == ord('3'):
-                model_complexity = 2
-                self.update_model(2)
-                print("Using heavy model")
+                self.conf_threshold = max(0.1, self.conf_threshold - 0.05)
+                print(f"Confidence threshold: {self.conf_threshold:.2f}")
             elif key == ord('s'):
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
-                filename = f"pose_{timestamp}.jpg"
+                filename = f"pose_tracker_{timestamp}.jpg"
                 cv2.imwrite(filename, processed_frame)
-                print(f"Saved: {filename}")
+                print(f"Screenshot saved: {filename}")
         
-        self.cap.release()
+        cap.release()
         cv2.destroyAllWindows()
-        self.pose.close()
-    
-    def update_model(self, complexity):
-        self.pose.close()
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=complexity,
-            smooth_landmarks=True,
-            min_detection_confidence=self.min_detection_confidence,
-            min_tracking_confidence=self.min_tracking_confidence
-        )
+        print("\nTracker stopped.")
 
-# فئة الوظيفة الرئيسية
 def main():
-    parser = argparse.ArgumentParser(description='Lite Human Pose Estimation')
+    parser = argparse.ArgumentParser(description='Accurate Pose Tracker')
     parser.add_argument('--camera', type=int, default=0,
                        help='Camera ID (default: 0)')
-    parser.add_argument('--confidence', type=float, default=0.5,
-                       help='Detection confidence (default: 0.5)')
+    parser.add_argument('--model', type=str, default='n',
+                       choices=['n', 's', 'm', 'l'],
+                       help='Model size: n (nano - fastest), s (small), m (medium), l (large - most accurate)')
     
     args = parser.parse_args()
     
-    estimator = LitePoseEstimator(
-        min_detection_confidence=args.confidence,
-        min_tracking_confidence=args.confidence
-    )
-    
-    estimator.run(camera_id=args.camera)
+    tracker = AccuratePoseTracker(model_size=args.model)
+    tracker.run(camera_id=args.camera)
 
-# فئة نقطة بدء البرنامج
 if __name__ == "__main__":
     main()
-
