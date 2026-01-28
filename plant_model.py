@@ -3,39 +3,44 @@ import cv2
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers
+from tensorflow.keras import layers, Model
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+from matplotlib.patches import Patch
 import os
 import sys
-import requests
-import zipfile
-from pathlib import Path
 import argparse
+from pathlib import Path
+import warnings
+from typing import List, Tuple, Optional, Dict, Any
+import json
 from datetime import datetime
+import logging
+
+# إعداد التسجيل
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # كاشف أمراض النبات
 class PlantDiseaseDetector:
-    def __init__(self, model_type='yolo'):
+    def __init__(self, model_type: str = 'cnn'):
+        """
+        مُهيأ لكاشف أمراض النبات
+        
+        Args:
+            model_type: نوع النموذج ('cnn' أو 'custom')
+        """
         self.model_type = model_type
         self.model = None
         self.class_names = []
-        self.input_size = (416, 416)
+        self.input_size = (224, 224)  # حجم قياسي لتصنيف الصور
         self.confidence_threshold = 0.5
         self.iou_threshold = 0.4
         
-    def setup_environment(self):
-        print("Setting up environment...")
+        # تعريف فئات الأمراض النباتية
+        self._initialize_class_names()
         
-        Path("models").mkdir(exist_ok=True)
-        Path("test_images").mkdir(exist_ok=True)
-        Path("output").mkdir(exist_ok=True)
-        
-        self.download_pretrained_model()
-    
-    def download_pretrained_model(self):
-        print("Loading pre-trained model...")
-        
+    def _initialize_class_names(self):
+        """تهيئة أسماء فئات الأمراض النباتية"""
         self.class_names = [
             'Apple___Apple_scab',
             'Apple___Black_rot',
@@ -77,293 +82,463 @@ class PlantDiseaseDetector:
             'Tomato___healthy'
         ]
         
-        if self.model_type == 'yolo':
-            self.create_yolo_model()
-        else:
-            self.create_cnn_model()
+        # فهرسة سريعة للفئات الصحية
+        self.healthy_indices = [i for i, name in enumerate(self.class_names) 
+                              if 'healthy' in name.lower()]
     
-    def create_yolo_model(self):
-        print("Creating YOLO model architecture...")
+    def setup_environment(self) -> bool:
+        """إعداد البيئة وإنشاء المجلدات الضرورية"""
+        try:
+            logger.info("إعداد البيئة...")
+            
+            # إنشاء المجلدات الضرورية
+            directories = ["models", "test_images", "output", "logs", "temp"]
+            for dir_name in directories:
+                Path(dir_name).mkdir(exist_ok=True)
+                logger.debug(f"تم إنشاء المجلد: {dir_name}")
+            
+            # تحميل النموذج
+            if not self._load_or_create_model():
+                logger.error("فشل في تحميل أو إنشاء النموذج")
+                return False
+            
+            logger.info("تم إعداد البيئة بنجاح")
+            return True
+            
+        except Exception as e:
+            logger.error(f"خطأ في إعداد البيئة: {e}")
+            return False
+    
+    def _load_or_create_model(self) -> bool:
+        """تحميل نموذج موجود أو إنشاء نموذج جديد"""
+        model_filename = f"models/plant_disease_{self.model_type}.h5"
         
-        inputs = keras.Input(shape=(416, 416, 3))
+        try:
+            if Path(model_filename).exists():
+                logger.info(f"تحميل النموذج من {model_filename}")
+                if self.model_type == 'cnn':
+                    self._create_cnn_model()
+                    self.model.load_weights(model_filename)
+                else:
+                    self._create_custom_model()
+                    self.model.load_weights(model_filename)
+                logger.info("تم تحميل النموذج بنجاح")
+            else:
+                logger.info("إنشاء نموذج جديد...")
+                if self.model_type == 'cnn':
+                    self._create_cnn_model()
+                else:
+                    self._create_custom_model()
+                logger.info("تم إنشاء نموذج جديد")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"خطأ في تحميل/إنشاء النموذج: {e}")
+            return False
+    
+    def _create_cnn_model(self):
+        """إنشاء نموذج CNN لتصنيف الأمراض"""
+        logger.info("إنشاء نموذج CNN...")
         
-        x = layers.Conv2D(16, (3, 3), padding='same')(inputs)
+        # استخدام بنية أساسية معمارية (يمكن استبدالها بـ ResNet، EfficientNet، إلخ)
+        inputs = layers.Input(shape=(*self.input_size, 3))
+        
+        # نموذج CNN مبسط
+        x = layers.Rescaling(1./255)(inputs)
+        
+        # كتل الالتفاف
+        x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
         x = layers.MaxPooling2D((2, 2))(x)
+        x = layers.Dropout(0.2)(x)
         
-        x = layers.Conv2D(32, (3, 3), padding='same')(x)
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
         x = layers.MaxPooling2D((2, 2))(x)
+        x = layers.Dropout(0.3)(x)
         
-        x = layers.Conv2D(64, (3, 3), padding='same')(x)
+        x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
         x = layers.MaxPooling2D((2, 2))(x)
+        x = layers.Dropout(0.4)(x)
         
-        x = layers.Conv2D(128, (3, 3), padding='same')(x)
+        x = layers.GlobalAveragePooling2D()(x)
+        
+        # طبقات مكثفة
+        x = layers.Dense(256, activation='relu')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
-        
-        x = layers.Flatten()(x)
-        x = layers.Dense(512, activation='relu')(x)
         x = layers.Dropout(0.5)(x)
         
-        outputs = layers.Dense(4 + len(self.class_names), activation='sigmoid')(x)
+        # طبقة الإخراج
+        outputs = layers.Dense(len(self.class_names), activation='softmax')(x)
         
-        self.model = keras.Model(inputs=inputs, outputs=outputs)
+        # تجميع النموذج
+        self.model = Model(inputs=inputs, outputs=outputs)
         
-        model_path = "models/plant_disease_yolo.h5"
-        if os.path.exists(model_path):
-            try:
-                self.model.load_weights(model_path)
-                print("Loaded pre-trained weights")
-            except:
-                print("Could not load weights, using random initialization")
-                self.initialize_model_weights()
-        else:
-            print("No pre-trained weights found. Using random initialization.")
-            self.initialize_model_weights()
-        
+        # تجميع النموذج
         self.model.compile(
-            optimizer='adam',
-            loss='mse',
-            metrics=['accuracy']
-        )
-    
-    def initialize_model_weights(self):
-        initializer = tf.keras.initializers.HeNormal()
-        for layer in self.model.layers:
-            if hasattr(layer, 'kernel_initializer'):
-                layer.kernel_initializer = initializer
-        self.model.build(self.model.input_shape)
-    
-    def create_cnn_model(self):
-        print("Creating CNN model...")
-        
-        self.model = keras.Sequential([
-            layers.Input(shape=(256, 256, 3)),
-            layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(256, (3, 3), activation='relu', padding='same'),
-            layers.MaxPooling2D((2, 2)),
-            layers.Flatten(),
-            layers.Dense(512, activation='relu'),
-            layers.Dropout(0.5),
-            layers.Dense(len(self.class_names), activation='softmax')
-        ])
-        
-        model_path = "models/plant_disease_cnn.h5"
-        if os.path.exists(model_path):
-            try:
-                self.model.load_weights(model_path)
-                print("Loaded pre-trained weights")
-            except:
-                print("Could not load weights, using random initialization")
-        
-        self.model.compile(
-            optimizer='adam',
+            optimizer=keras.optimizers.Adam(learning_rate=0.001),
             loss='categorical_crossentropy',
-            metrics=['accuracy']
+            metrics=['accuracy', keras.metrics.Precision(), keras.metrics.Recall()]
         )
-    
-    def preprocess_image(self, image):
-        if self.model_type == 'yolo':
-            img = cv2.resize(image, self.input_size)
-        else:
-            img = cv2.resize(image, (256, 256))
         
+        logger.info("تم إنشاء نموذج CNN")
+    
+    def _create_custom_model(self):
+        """إنشاء نموذج مخصص مع كشف المنطقة (ليس YOLO حقيقي)"""
+        logger.info("إنشاء نموذج مخصص مع كشف المنطقة...")
+        
+        # هذا ليس YOLO حقيقي، لكنه نموذج يدمج التصنيف مع تقدير المنطقة
+        inputs = layers.Input(shape=(256, 256, 3))
+        
+        # معالجة مسبقة
+        x = layers.Rescaling(1./255)(inputs)
+        
+        # شبكة أساسية
+        x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # فرع التصنيف
+        classification_branch = layers.GlobalAveragePooling2D()(x)
+        classification_branch = layers.Dense(128, activation='relu')(classification_branch)
+        classification_branch = layers.Dropout(0.5)(classification_branch)
+        classification_output = layers.Dense(len(self.class_names), 
+                                           activation='softmax', 
+                                           name='classification')(classification_branch)
+        
+        # فرع الصندوق المحيط (بسيط)
+        box_branch = layers.Flatten()(x)
+        box_branch = layers.Dense(64, activation='relu')(box_branch)
+        box_branch = layers.Dropout(0.5)(box_branch)
+        box_output = layers.Dense(4, activation='sigmoid', name='bounding_box')(box_branch)
+        
+        # نموذج متعدد المخرجات
+        self.model = Model(inputs=inputs, outputs=[classification_output, box_output])
+        
+        # تجميع النموذج
+        self.model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=0.001),
+            loss={
+                'classification': 'categorical_crossentropy',
+                'bounding_box': 'mse'
+            },
+            loss_weights={
+                'classification': 1.0,
+                'bounding_box': 0.5
+            },
+            metrics={
+                'classification': ['accuracy']
+            }
+        )
+        
+        logger.info("تم إنشاء النموذج المخصص")
+    
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """معالجة مسبقة للصورة"""
+        if self.model_type == 'cnn':
+            target_size = self.input_size
+        else:
+            target_size = (256, 256)
+        
+        # تغيير الحجم
+        img = cv2.resize(image, target_size)
+        
+        # تطبيع
         img = img.astype(np.float32) / 255.0
+        
+        # إضافة بُعد الدُفعة
         img = np.expand_dims(img, axis=0)
         
         return img
     
-    def detect_diseases(self, image_path, output_path=None):
-        print(f"\nProcessing image: {image_path}")
+    def detect_diseases(self, image_path: str, output_path: Optional[str] = None
+                       ) -> Tuple[Optional[np.ndarray], List[Dict[str, Any]]]:
+        """
+        كشف الأمراض في صورة
         
-        if not os.path.exists(image_path):
-            print(f"Error: File does not exist: {image_path}")
+        Args:
+            image_path: مسار الصورة
+            output_path: مسار الحفظ (اختياري)
+            
+        Returns:
+            tuple: (الصورة المحولة، قائمة بالكشوفات)
+        """
+        logger.info(f"معالجة الصورة: {image_path}")
+        
+        # التحقق من وجود الملف
+        if not Path(image_path).exists():
+            logger.error(f"الملف غير موجود: {image_path}")
             return None, []
         
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"Error: Could not read image from {image_path}")
-            return None, []
-        
+        # قراءة الصورة
         try:
+            image = cv2.imread(image_path)
+            if image is None:
+                logger.error(f"لا يمكن قراءة الصورة: {image_path}")
+                return None, []
+            
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        except:
-            print(f"Error: Invalid image format for {image_path}")
+        except Exception as e:
+            logger.error(f"خطأ في قراءة الصورة: {e}")
             return None, []
         
-        original_h, original_w = image_rgb.shape[:2]
-        
+        # التحقق من وجود النموذج
         if self.model is None:
-            print("Error: Model not initialized. Call setup_environment() first.")
+            logger.error("النموذج غير مهيأ")
             return None, []
         
-        processed_img = self.preprocess_image(image_rgb)
-        
-        if self.model_type == 'yolo':
-            predictions = self.model.predict(processed_img, verbose=0)[0]
-            detections = self.parse_yolo_predictions(predictions, original_w, original_h)
-        else:
-            predictions = self.model.predict(processed_img, verbose=0)[0]
-            class_idx = np.argmax(predictions)
-            confidence = predictions[class_idx]
+        # المعالجة المسبقة
+        try:
+            processed_img = self.preprocess_image(image_rgb)
             
-            detections = [{
-                'bbox': [50, 50, original_w-100, original_h-100],
-                'confidence': float(confidence),
-                'class_id': int(class_idx),
-                'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown'
-            }]
-        
-        result_image = self.draw_detections(image_rgb, detections)
-        
-        if output_path:
-            try:
-                output_dir = os.path.dirname(output_path)
-                if output_dir:
-                    Path(output_dir).mkdir(exist_ok=True)
-                cv2.imwrite(output_path, cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
-                print(f"Saved result to: {output_path}")
-            except Exception as e:
-                print(f"Error saving output: {e}")
-        
-        return result_image, detections
+            # التنبؤ
+            if self.model_type == 'cnn':
+                predictions = self.model.predict(processed_img, verbose=0)[0]
+                
+                # إيجاد أعلى ثقة
+                class_idx = np.argmax(predictions)
+                confidence = float(predictions[class_idx])
+                
+                # تحضير النتائج
+                detections = [{
+                    'bbox': None,  # لا يوجد صندوق محيط لـ CNN
+                    'confidence': confidence,
+                    'class_id': int(class_idx),
+                    'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown',
+                    'is_healthy': 'healthy' in self.class_names[class_idx].lower()
+                }]
+            else:
+                # نموذج مخصص متعدد المخرجات
+                class_pred, bbox_pred = self.model.predict(processed_img, verbose=0)
+                class_idx = np.argmax(class_pred[0])
+                confidence = float(class_pred[0][class_idx])
+                
+                # صندوق محيط (بسيط)
+                bbox = bbox_pred[0] * np.array([image.shape[1], image.shape[0], 
+                                               image.shape[1], image.shape[0]])
+                
+                detections = [{
+                    'bbox': bbox.tolist(),
+                    'confidence': confidence,
+                    'class_id': int(class_idx),
+                    'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown',
+                    'is_healthy': 'healthy' in self.class_names[class_idx].lower()
+                }]
+            
+            # رسم النتائج
+            result_image = self._draw_detections(image_rgb.copy(), detections)
+            
+            # حفظ الناتج
+            if output_path:
+                self._save_output_image(result_image, output_path)
+            
+            logger.info(f"تم الكشف عن {len(detections)} مرض/أمراض")
+            return result_image, detections
+            
+        except Exception as e:
+            logger.error(f"خطأ في معالجة الصورة: {e}")
+            return None, []
     
-    def parse_yolo_predictions(self, predictions, img_w, img_h):
-        detections = []
+    def detect_from_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        كشف الأمراض من إطار فيديو مباشرة
         
-        if len(predictions) < 4 + len(self.class_names):
+        Args:
+            frame: إطار الفيديو (صورة BGR)
+            
+        Returns:
+            list: قائمة بالكشوفات
+        """
+        try:
+            # تحويل من BGR إلى RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # المعالجة المسبقة
+            processed_img = self.preprocess_image(frame_rgb)
+            
+            # التنبؤ
+            if self.model_type == 'cnn':
+                predictions = self.model.predict(processed_img, verbose=0)[0]
+                
+                # إيجاد أعلى ثقة
+                class_idx = np.argmax(predictions)
+                confidence = float(predictions[class_idx])
+                
+                # تحضير النتائج
+                detections = [{
+                    'bbox': None,
+                    'confidence': confidence,
+                    'class_id': int(class_idx),
+                    'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown',
+                    'is_healthy': 'healthy' in self.class_names[class_idx].lower()
+                }]
+            else:
+                # نموذج مخصص متعدد المخرجات
+                class_pred, bbox_pred = self.model.predict(processed_img, verbose=0)
+                class_idx = np.argmax(class_pred[0])
+                confidence = float(class_pred[0][class_idx])
+                
+                # صندوق محيط (بسيط)
+                bbox = bbox_pred[0] * np.array([frame.shape[1], frame.shape[0], 
+                                               frame.shape[1], frame.shape[0]])
+                
+                detections = [{
+                    'bbox': bbox.tolist(),
+                    'confidence': confidence,
+                    'class_id': int(class_idx),
+                    'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown',
+                    'is_healthy': 'healthy' in self.class_names[class_idx].lower()
+                }]
+            
             return detections
-        
-        num_detections = 1
-        
-        for i in range(num_detections):
-            start_idx = i * (4 + len(self.class_names))
             
-            if start_idx + 4 + len(self.class_names) > len(predictions):
-                break
-            
-            bbox_norm = predictions[start_idx:start_idx+4]
-            class_probs = predictions[start_idx+4:start_idx+4+len(self.class_names)]
-            class_idx = np.argmax(class_probs)
-            confidence = class_probs[class_idx]
-            
-            if confidence > self.confidence_threshold and class_idx < len(self.class_names):
-                x_center = np.clip(bbox_norm[0], 0, 1) * img_w
-                y_center = np.clip(bbox_norm[1], 0, 1) * img_h
-                width = np.clip(bbox_norm[2], 0, 1) * img_w * 0.5
-                height = np.clip(bbox_norm[3], 0, 1) * img_h * 0.5
-                
-                x_min = max(0, int(x_center - width/2))
-                y_min = max(0, int(y_center - height/2))
-                width = min(img_w - x_min, int(width))
-                height = min(img_h - y_min, int(height))
-                
-                if width > 0 and height > 0:
-                    detections.append({
-                        'bbox': [x_min, y_min, width, height],
-                        'confidence': float(confidence),
-                        'class_id': int(class_idx),
-                        'class_name': self.class_names[class_idx]
-                    })
-        
-        return detections
+        except Exception as e:
+            logger.error(f"خطأ في كشف الأمراض من الإطار: {e}")
+            return []
     
-    def draw_detections(self, image, detections):
+    def _draw_detections(self, image: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
+        """رسم الصناديق المحيطة والتسميات على الصورة"""
         result = image.copy()
         
+        # توليد ألوان
         colors = plt.cm.tab10(np.linspace(0, 1, len(self.class_names)))
         colors = (colors[:, :3] * 255).astype(int)
         
         for det in detections:
-            bbox = det['bbox']
-            class_name = det.get('class_name', 'unknown')
-            confidence = det.get('confidence', 0.0)
+            class_name = det['class_name']
+            confidence = det['confidence']
+            is_healthy = det['is_healthy']
             
-            if len(bbox) != 4:
-                continue
+            # اختيار اللون بناءً على الحالة
+            if is_healthy:
+                color = (0, 255, 0)  # أخضر للصحة
+            elif confidence > 0.7:
+                color = (0, 0, 255)  # أحمر للأمراض عالية الثقة
+            else:
+                color = (255, 165, 0)  # برتقالي للأمراض متوسطة الثقة
             
-            x, y, w, h = bbox
+            # رسم الصندوق المحيط (إن وجد)
+            if det['bbox'] is not None:
+                bbox = det['bbox']
+                x, y, w, h = map(int, bbox)
+                
+                if 0 <= x < result.shape[1] and 0 <= y < result.shape[0] and w > 0 and h > 0:
+                    cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
             
-            if x >= result.shape[1] or y >= result.shape[0] or w <= 0 or h <= 0:
-                continue
-            
-            x = int(x)
-            y = int(y)
-            w = int(w)
-            h = int(h)
-            
-            color_idx = det.get('class_id', 0) % len(colors)
-            color = tuple(map(int, colors[color_idx]))
-            
-            cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
-            
+            # إضافة تسمية
             label = f"{class_name}: {confidence:.2f}"
             try:
-                label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(result, (x, max(0, y - label_size[1] - 5)), 
-                            (x + label_size[0], y), color, -1)
-                cv2.putText(result, label, (x, max(5, y - 5)), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            except:
-                pass
-            
-            if confidence > 0.7 and 'healthy' not in class_name.lower():
-                warning = "DISEASE DETECTED!"
-                try:
-                    cv2.putText(result, warning, (10, 30), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                except:
-                    pass
+                font_scale = 0.6
+                thickness = 2
+                
+                # حساب حجم النص
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+                )
+                
+                # تحديد موقع التسمية
+                if det['bbox'] is not None:
+                    label_x = max(0, x)
+                    label_y = max(0, y - 10)
+                else:
+                    label_x = 10
+                    label_y = 30
+                
+                # خلفية النص
+                cv2.rectangle(result, 
+                            (label_x, label_y - text_height - 5),
+                            (label_x + text_width, label_y + 5),
+                            color, -1)
+                
+                # النص
+                cv2.putText(result, label, 
+                          (label_x, label_y),
+                          cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                          (255, 255, 255), thickness)
+                
+            except Exception as e:
+                logger.warning(f"خطأ في إضافة التسمية: {e}")
+        
+        # إضافة تنبيه للأمراض الخطيرة
+        high_risk_detections = [d for d in detections 
+                              if not d['is_healthy'] and d['confidence'] > 0.7]
+        
+        if high_risk_detections:
+            warning_text = "تحذير: تم الكشف عن أمراض نباتية!"
+            cv2.putText(result, warning_text, 
+                      (10, result.shape[0] - 20),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         return result
     
-    def process_video(self, video_path, output_path=None):
-        print(f"\nProcessing video: {video_path}")
+    def _save_output_image(self, image: np.ndarray, output_path: str):
+        """حفظ الصورة الناتجة"""
+        try:
+            output_dir = Path(output_path).parent
+            if output_dir:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            
+            cv2.imwrite(output_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            logger.info(f"تم حفظ الناتج في: {output_path}")
+        except Exception as e:
+            logger.error(f"خطأ في حفظ الصورة: {e}")
+    
+    def process_video(self, video_path: str, output_path: Optional[str] = None) -> Optional[str]:
+        """معالجة فيديو للكشف عن الأمراض"""
+        logger.info(f"معالجة الفيديو: {video_path}")
         
-        if not os.path.exists(video_path):
-            print(f"Error: File does not exist: {video_path}")
+        if not Path(video_path).exists():
+            logger.error(f"الملف غير موجود: {video_path}")
             return None
         
+        # فتح الفيديو
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"Error: Could not open video {video_path}")
+            logger.error(f"لا يمكن فتح الفيديو: {video_path}")
             return None
         
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        # معلومات الفيديو
+        fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
         if fps <= 0:
             fps = 30
+            logger.warning("تم تعيين معدل الإطار إلى 30 افتراضياً")
         
-        out = None
+        # إعداد كاتب الفيديو
+        writer = None
         if output_path:
             try:
-                output_dir = os.path.dirname(output_path)
+                output_dir = Path(output_path).parent
                 if output_dir:
-                    Path(output_dir).mkdir(exist_ok=True)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-                if not out.isOpened():
-                    print(f"Error: Could not create video writer for {output_path}")
-                    out = None
+                writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+                
+                if not writer.isOpened():
+                    logger.error(f"لا يمكن إنشاء ملف الفيديو: {output_path}")
+                    writer = None
             except Exception as e:
-                print(f"Error setting up video writer: {e}")
-                out = None
+                logger.error(f"خطأ في إعداد كاتب الفيديو: {e}")
+                writer = None
         
         frame_count = 0
-        print(f"Video Info: {width}x{height}, {fps} FPS")
+        processed_count = 0
+        logger.info(f"معلومات الفيديو: {width}x{height}, {fps:.1f} إطار/ثانية")
         
+        # معالجة الإطارات
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -371,133 +546,239 @@ class PlantDiseaseDetector:
             
             frame_count += 1
             
-            if frame_count % 5 == 0:
+            # معالجة إطار من كل 10 إطارات لتحسين الأداء
+            if frame_count % 10 == 0:
                 try:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    processed_img = self.preprocess_image(frame_rgb)
+                    # كشف الأمراض في الإطار
+                    detections = self.detect_from_frame(frame)
                     
-                    if self.model_type == 'yolo':
-                        predictions = self.model.predict(processed_img, verbose=0)[0]
-                        detections = self.parse_yolo_predictions(predictions, width, height)
-                    else:
-                        predictions = self.model.predict(processed_img, verbose=0)[0]
-                        class_idx = np.argmax(predictions)
-                        confidence = predictions[class_idx]
+                    if detections:
+                        # تحويل الإطار إلى RGB للرسم
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         
-                        detections = [{
-                            'bbox': [100, 100, width-200, height-200],
-                            'confidence': float(confidence),
-                            'class_id': int(class_idx),
-                            'class_name': self.class_names[class_idx] if class_idx < len(self.class_names) else 'unknown'
-                        }]
+                        # رسم النتائج
+                        frame_with_detections = self._draw_detections(frame_rgb, detections)
+                        frame_bgr = cv2.cvtColor(frame_with_detections, cv2.COLOR_RGB2BGR)
+                    else:
+                        frame_bgr = frame
                     
-                    result_frame = self.draw_detections(frame_rgb, detections)
-                    result_frame_bgr = cv2.cvtColor(result_frame, cv2.COLOR_RGB2BGR)
+                    processed_count += 1
+                    
                 except Exception as e:
-                    print(f"Error processing frame {frame_count}: {e}")
-                    result_frame_bgr = frame
+                    logger.warning(f"خطأ في معالجة الإطار {frame_count}: {e}")
+                    frame_bgr = frame
             else:
-                result_frame_bgr = frame
+                frame_bgr = frame
             
-            if out is not None:
-                out.write(result_frame_bgr)
+            # الكتابة إلى الملف
+            if writer:
+                writer.write(frame_bgr)
             
-            if frame_count % 50 == 0:
-                print(f"Processed {frame_count} frames...")
+            # تحديث التقدم
+            if frame_count % 100 == 0:
+                logger.info(f"تم معالجة {frame_count} إطار ({processed_count} مع كشف)")
         
+        # التنظيف
         cap.release()
-        if out is not None:
-            out.release()
-            print(f"Video saved to: {output_path}")
+        if writer:
+            writer.release()
+            logger.info(f"تم حفظ الفيديو في: {output_path}")
+            return output_path
         
-        return output_path if out is not None else None
+        return None
     
-    def visualize_results(self, image, detections):
-        plt.figure(figsize=(12, 8))
+    def visualize_results(self, image: np.ndarray, detections: List[Dict[str, Any]]):
+        """تصور النتائج"""
+        plt.figure(figsize=(15, 6))
         
-        plt.subplot(1, 2, 1)
+        # الصورة الأصلية مع الكشوفات
+        plt.subplot(1, 3, 1)
         plt.imshow(image)
-        plt.title("Detection Results")
+        plt.title("نتائج الكشف")
         plt.axis('off')
         
-        plt.subplot(1, 2, 2)
+        # مخطط الثقة
+        plt.subplot(1, 3, 2)
         if detections:
-            classes = [d.get('class_name', 'unknown') for d in detections]
-            confidences = [d.get('confidence', 0.0) for d in detections]
+            classes = [d['class_name'] for d in detections]
+            confidences = [d['confidence'] for d in detections]
+            colors = ['green' if d['is_healthy'] else 'red' for d in detections]
             
-            y_pos = np.arange(len(classes))
-            colors = plt.cm.tab10(np.linspace(0, 1, len(classes)))
+            bars = plt.bar(range(len(classes)), confidences, color=colors)
+            plt.xticks(range(len(classes)), classes, rotation=45, ha='right')
+            plt.ylabel('الثقة')
+            plt.title('ثقة الكشف')
+            plt.ylim(0, 1)
             
-            plt.barh(y_pos, confidences, color=colors)
-            plt.yticks(y_pos, classes)
-            plt.xlabel('Confidence')
-            plt.title('Detected Diseases')
-            plt.xlim(0, 1)
-            
-            for i, conf in enumerate(confidences):
-                plt.text(conf + 0.02, i, f'{conf:.2f}', va='center')
+            # إضافة قيم الثقة
+            for bar, conf in zip(bars, confidences):
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                        f'{conf:.2f}', ha='center', va='bottom')
         else:
-            plt.text(0.5, 0.5, 'No diseases detected', 
+            plt.text(0.5, 0.5, 'لم يتم الكشف عن أمراض',
+                    ha='center', va='center', fontsize=12)
+            plt.axis('off')
+        
+        # ملخص الإحصائيات
+        plt.subplot(1, 3, 3)
+        if detections:
+            healthy_count = sum(1 for d in detections if d['is_healthy'])
+            disease_count = len(detections) - healthy_count
+            
+            labels = ['صحي', 'مريض']
+            sizes = [healthy_count, disease_count]
+            colors_pie = ['green', 'red']
+            
+            plt.pie(sizes, labels=labels, colors=colors_pie, autopct='%1.1f%%', startangle=90)
+            plt.axis('equal')
+            plt.title('توزيع الصحة والمرض')
+        else:
+            plt.text(0.5, 0.5, 'لا بيانات',
                     ha='center', va='center', fontsize=12)
             plt.axis('off')
         
         plt.tight_layout()
         plt.show()
+    
+    def generate_report(self, detections: List[Dict[str, Any]], output_path: str):
+        """توليد تقرير نصي عن النتائج"""
+        try:
+            report = []
+            report.append("=" * 50)
+            report.append("تقرير كشف أمراض النبات")
+            report.append("=" * 50)
+            report.append(f"التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            report.append(f"عدد الكشوفات: {len(detections)}")
+            report.append("-" * 50)
+            
+            # تفاصيل الكشوفات
+            for i, det in enumerate(detections, 1):
+                report.append(f"\nالكشف {i}:")
+                report.append(f"  المرض: {det['class_name']}")
+                report.append(f"  الثقة: {det['confidence']:.2%}")
+                report.append(f"  الحالة: {'صحي' if det['is_healthy'] else 'مريض'}")
+            
+            # ملخص
+            report.append("\n" + "-" * 50)
+            healthy_count = sum(1 for d in detections if d['is_healthy'])
+            disease_count = len(detections) - healthy_count
+            
+            report.append("الملخص:")
+            report.append(f"  النباتات الصحية: {healthy_count}")
+            report.append(f"  النباتات المريضة: {disease_count}")
+            
+            if disease_count > 0:
+                report.append("  الحالة: تحتاج إلى تدخل")
+            else:
+                report.append("  الحالة: جيدة")
+            
+            report.append("=" * 50)
+            
+            # حفظ التقرير
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(report))
+            
+            logger.info(f"تم حفظ التقرير في: {output_path}")
+            
+        except Exception as e:
+            logger.error(f"خطأ في توليد التقرير: {e}")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='Plant Disease Detection System')
-    parser.add_argument('--input', type=str, required=True, 
-                       help='Path to input image or video')
+    """الدالة الرئيسية"""
+    parser = argparse.ArgumentParser(
+        description='نظام كشف أمراض النبات باستخدام التعلم الآلي',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--input', type=str, required=True,
+                       help='مسار صورة أو فيديو الإدخال')
     parser.add_argument('--output', type=str, default=None,
-                       help='Path to save output (optional)')
-    parser.add_argument('--model', type=str, default='yolo',
-                       choices=['yolo', 'cnn'],
-                       help='Model type to use')
+                       help='مسار حفظ الناتج (اختياري)')
+    parser.add_argument('--model', type=str, default='cnn',
+                       choices=['cnn', 'custom'],
+                       help='نوع النموذج (cnn أو custom)')
     parser.add_argument('--visualize', action='store_true',
-                       help='Show visualization of results')
+                       help='عرض تصور النتائج')
+    parser.add_argument('--report', action='store_true',
+                       help='توليد تقرير نصي')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                       help='حد الثقة للكشف (0.0 إلى 1.0)')
     
     args = parser.parse_args()
     
-    if not args.input:
-        print("Error: --input argument is required")
-        return
+    print("\n" + "=" * 60)
+    print("نظام كشف أمراض النبات باستخدام التعلم الآلي")
+    print("=" * 60)
     
-    print("=== Plant Disease Detection System ===")
+    # التحقق من المدخلات
+    if not os.path.exists(args.input):
+        print(f"خطأ: ملف الإدخال غير موجود: {args.input}")
+        sys.exit(1)
+    
+    # إنشاء الكاشف
     detector = PlantDiseaseDetector(model_type=args.model)
-    detector.setup_environment()
+    detector.confidence_threshold = args.threshold
     
-    input_path = args.input
-    if not os.path.exists(input_path):
-        print(f"Error: Input file does not exist: {input_path}")
-        return
+    # إعداد البيئة
+    if not detector.setup_environment():
+        print("فشل في إعداد البيئة. الخروج...")
+        sys.exit(1)
     
-    file_ext = os.path.splitext(input_path)[1].lower()
+    # تحديد نوع الملف
+    file_ext = os.path.splitext(args.input)[1].lower()
     
-    if file_ext in ['.jpg', '.jpeg', '.png', '.bmp']:
+    if file_ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']:
+        print(f"معالجة صورة: {args.input}")
+        
+        # الكشف عن الأمراض
         result_image, detections = detector.detect_diseases(
-            input_path, 
+            args.input,
             args.output
         )
         
         if result_image is not None:
-            print(f"\nDetected {len(detections)} disease regions:")
-            for det in detections:
-                print(f"  - {det.get('class_name', 'unknown')}: {det.get('confidence', 0):.2%} confidence")
+            print(f"\nنتائج الكشف:")
+            print("-" * 40)
             
+            for det in detections:
+                status = "صحي" if det['is_healthy'] else "مريض"
+                print(f"  • {det['class_name']}: {det['confidence']:.2%} ({status})")
+            
+            print("-" * 40)
+            
+            # عرض التصور
             if args.visualize:
                 detector.visualize_results(result_image, detections)
+            
+            # توليد تقرير
+            if args.report:
+                report_path = args.output.replace('.jpg', '_report.txt') if args.output else 'output/report.txt'
+                detector.generate_report(detections, report_path)
     
-    elif file_ext in ['.mp4', '.avi', '.mov', '.mkv']:
+    elif file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.flv']:
+        print(f"معالجة فيديو: {args.input}")
+        
         output_video = args.output or 'output/detected_video.mp4'
-        result = detector.process_video(input_path, output_video)
+        result = detector.process_video(args.input, output_video)
+        
         if result:
-            print(f"\nVideo processing complete. Saved to: {result}")
+            print(f"✓ تم معالجة الفيديو وحفظه في: {result}")
+        else:
+            print("✗ فشل في معالجة الفيديو")
     
     else:
-        print(f"Error: Unsupported file format: {file_ext}")
-        print("Supported formats: .jpg, .png, .mp4, .avi, .mov, .mkv")
+        print(f"خطأ: تنسيق ملف غير مدعوم: {file_ext}")
+        print("التنسيقات المدعومة:")
+        print("  الصور: .jpg, .png, .bmp, .tiff")
+        print("  الفيديو: .mp4, .avi, .mov, .mkv")
+        sys.exit(1)
     
-    print("\n=== Processing Complete ===")
+    print("\n" + "=" * 60)
+    print("اكتملت المعالجة بنجاح!")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

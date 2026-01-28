@@ -26,7 +26,7 @@ class TrafficSignApp:
     def __init__(self, root):
         self.root = root
         self.root.title("🚦 Traffic Sign Recognition System")
-        self.root.geometry("1200x800")
+        self.root.geometry("1920x1080")
         
         self.classes = [
             'Speed limit (20km/h)', 'Speed limit (30km/h)', 'Speed limit (50km/h)', 
